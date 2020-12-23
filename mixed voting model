@@ -1,0 +1,98 @@
+#data input and scaling
+
+trainwhole <- read.csv("training.csv")
+test <- read.csv("test.csv")
+preproc <- preProcess(trainwhole[,-c(1,99)], method=c("center", "scale"))
+norm <- predict(preproc, trainwhole[,-c(1,99)])
+trainwhole <- data.frame("id" = trainwhole[,1],norm,"class" = trainwhole[,99])
+
+#feature selection
+
+names_of_sig<-c( "VEST_score","Gene_body_hypermethylation_in_cancer","Gene_body_hypomethylation_in_cancer","H3K9me3_height","H3K9me2_height","H4K20me1_height")
+#if we normalize the values first ane then run the following multinorm algorithm, we will detect some significant predictors even though the values are normalized so that the difference are not that obvious any more, so we will still include them into the significant predictors, even though they may not appear in the following algorithm without the normalizing 
+train <- trainwhole
+train$class01 <- factor(train$class, labels = c("a0","b1","c2"))
+train = train[,-c(1,99)]
+train  
+train<-train[,-1]
+library(nnet)
+train<-train[,-c(98)]
+test <- multinom(class01 ~ ., data = train)
+train$class01 <- relevel(train$class01, ref = "b1")
+z <- summary(test)$coefficients/summary(test)$standard.errors
+p <- (1 - pnorm(abs(z), 0, 1)) * 2
+p#check the significant p-values of the each variable's regresesion coefficient 
+p<-data.frame(p)
+for(i in 1: ncol(p)){
+  if(p[,i][1]<=0.05&p[,i][2]<=0.05){
+    names_of_sig<-c(names_of_sig,names(p)[i])
+  }#keep variables with p-value less than significance level 0.05
+}
+
+names_of_sig#first round of filtering significant predictors
+
+library(dplyr)
+cor_detect<-train%>%select(all_of(names_of_sig[-7]))#eliminate x.intercept
+cor(cor_detect)[which(abs(cor(cor_detect))>0.7&cor(cor_detect)!=1&cor(cor_detect)!=-1)]
+#check and try to remove the highly correlated significant variables
+
+#and then we check the significant variables we are going to keep in the model by drawing all boxplots
+for (i in 1:(ncol(train)-2))
+{
+  boxplot(train[,i]~train$class-1, xlab = "class01", ylab = colnames(train)[i])
+}
+
+frmla <- class01 ~ Missense_Entropy + Missense_TO_Silent_Ratio + Missense_TO_Benign_Ratio + 
+LOF_TO_Total_Ratio + Splice_TO_Total_Ratio + LOF_TO_Missense_Ratio + Silent_fraction + Nonsense_fraction + 
+Frameshift_indel_fraction + VEST_score + Cell_proliferation_rate_CRISPR_KD + Super_Enhancer_percentage + 
+BioGRID_clossness + Gene_body_hypermethylation_in_cancer + intolerant_pLI + Broad_H3K4me1_percentage + 
+Broad_H3K27ac_percentage + Broad_H3K79me2_percentage + Broad_H4K20me1_percentage + Broad_H3K4me2_percentage + 
+Missense_TO_Total_Ratio + Broad_H3K4me2_percentage + H3K9me3_height + H3K9me2_height + H4K20me1_height
+
+#model training with cross validation
+
+library(caret)
+myTrainControl <- trainControl(method = "cv", number = 5, classProbs = TRUE, savePredictions = TRUE)
+qdafit <- train(frmla, data = train, method = "qda", preProc = c("center", "scale"), trControl = myTrainControl)
+ldafit <- train(frmla, data = train, method = "lda", preProc = c("center", "scale"), trControl = myTrainControl)
+glmfit <- train(frmla, data = train, method = "multinom", preProc = c("center", "scale"), trControl = myTrainControl)
+
+#voting model
+
+test_norm <- predict(preproc, test[,-c(1,99)])
+
+res_lda_prob <- predict(ldafit,test_norm,type = "prob")
+res_glm_prob <- predict(glmfit,test_norm,type = "prob")
+res_qda_prob <- predict(qdafit,test_norm,type = "prob")
+
+res <- matrix(rep(0,1363),nrow=1363)
+
+for(i in 1:1363){
+  #if glm predicts 1 or 2
+  if (res_glm_prob[i, 2] > 0.1 | res_glm_prob[i, 3] > 0.1 | res_lda_prob[i, 2] > 0.03 | res_lda_prob[i, 3] > 0.03) {
+    #if (res_glm_prob[i, 2] > 0.1 | res_glm_prob[i, 3] > 0.1 | res_lda_prob[i, 2] > 0.03 | res_lda_prob[i, 3] > 0.03) {
+      #if qda predicts 0, just follow the results of lda
+      if(res_qda_prob[i, 2] > 0.005 & res_qda_prob[i, 3] > 0.005){
+        res[i] <- ifelse(res_lda_prob[i,2]>res_lda_prob[i,3],1,2)
+      }
+      #if qda predicts 1 or 2, see the results for 3
+      else{
+        is1_glm <- res_glm_prob[i, 2] > res_glm_prob[i, 3]
+        is1_lda <- res_lda_prob[i, 2] > res_lda_prob[i, 3]
+        is1_qda <- res_qda_prob[i, 2] > res_qda_prob[i, 3]
+        if(sum(is1_glm,is1_lda,is1_qda)>=2){
+          #vote more for class1
+          res[i] <- 1
+        }
+        else{
+          #vote more for class2
+          res[i] <- 2
+        }
+      }
+    }
+}
+
+
+sample$class <- res
+#write.csv(sample, "ourkagglesubmission.csv", row.names = F)
+
